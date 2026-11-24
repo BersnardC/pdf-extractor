@@ -1,0 +1,6 @@
+docs/*
+output/*
+*.log
+pycache/
+__pycache__/
+*.pyc
