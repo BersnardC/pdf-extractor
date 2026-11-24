@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import re
+import time
 import unicodedata
 from datetime import datetime
 
@@ -393,56 +394,85 @@ def escribir_unknown_y_suggest(unknowns):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Extraer registros RPI de los PDFs en docs/"
+        description="Extraer registros RPI de los PDFs de una carpeta"
+    )
+    parser.add_argument(
+        "--folder",
+        default=DOCS_DIR,
+        help="Carpeta con los PDFs de entrada (default: docs/)",
     )
     parser.add_argument(
         "--file",
-        help="Procesar solo este PDF de docs/ (ej. BRTM_1.pdf)",
+        help="Procesar solo este PDF de la carpeta (ej. BRTM_1.pdf)",
+    )
+    parser.add_argument(
+        "--files",
+        help="Procesar varios PDFs de la carpeta, separados por coma (ej. a.pdf,b.pdf)",
     )
     args = parser.parse_args()
 
+    if args.file and args.files:
+        print("Usa --file o --files, no ambos.")
+        raise SystemExit(1)
+
+    carpeta = args.folder
+    if not os.path.isdir(carpeta):
+        print(f"No existe el directorio {carpeta}/")
+        raise SystemExit(1)
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    if not os.path.isdir(DOCS_DIR):
-        print(f"No existe el directorio {DOCS_DIR}/")
-        return
-
     if args.file:
-        nombre = os.path.basename(args.file)
-        ruta = os.path.join(DOCS_DIR, nombre)
-        if not os.path.isfile(ruta):
-            print(f"No existe {ruta}")
-            raise SystemExit(1)
-        pdfs = [nombre]
+        nombres = [os.path.basename(args.file)]
+    elif args.files:
+        nombres = [
+            n.strip() for n in args.files.split(",") if n.strip()
+        ]
     else:
-        pdfs = sorted(
-            f for f in os.listdir(DOCS_DIR) if f.lower().endswith(".pdf")
+        nombres = sorted(
+            f for f in os.listdir(carpeta) if f.lower().endswith(".pdf")
         )
-        if not pdfs:
-            print(f"No hay PDFs en {DOCS_DIR}/")
+        if not nombres:
+            print(f"No hay PDFs en {carpeta}/")
             return
+
+    faltantes = [
+        n
+        for n in nombres
+        if not os.path.isfile(os.path.join(carpeta, n))
+    ]
+    if faltantes:
+        print(f"No existen: {', '.join(faltantes)}")
+        raise SystemExit(1)
 
     rules, regex_rules = cargar_rules()
     unknowns = cargar_unknown()
     print(f"Rules cargadas: {len(rules)} campos ({len(regex_rules)} con regex)")
-    print(f"PDFs a procesar: {len(pdfs)}")
+    print(f"Carpeta: {carpeta}")
+    print(f"PDFs a procesar: {len(nombres)}")
 
     total_regs = 0
     total_imgs = 0
+    t_total = time.perf_counter()
 
-    for nombre in pdfs:
-        ruta = os.path.join(DOCS_DIR, nombre)
+    for nombre in nombres:
+        ruta = os.path.join(carpeta, nombre)
+        t0 = time.perf_counter()
         try:
             r, i = procesar_pdf(ruta, OUTPUT_DIR, rules, regex_rules, unknowns)
             total_regs += r
             total_imgs += i
         except Exception as e:
             print(f"  ERROR procesando {nombre}: {e}")
+        dt = time.perf_counter() - t0
+        print(f"  [tiempo] {nombre}: {dt:.2f}s")
 
+    dt_total = time.perf_counter() - t_total
     escribir_unknown_y_suggest(unknowns)
     print(f"\n=== TOTAL ===")
     print(f"Registros: {total_regs}")
     print(f"Logos: {total_imgs}")
+    print(f"[tiempo] Total: {dt_total:.2f}s ({len(nombres)} PDFs)")
     print(f"Salida: {OUTPUT_DIR}/")
 
 
