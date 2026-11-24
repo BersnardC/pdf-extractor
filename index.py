@@ -10,29 +10,24 @@ import pymupdf
 # --- CONFIGURACIÓN ---
 DOCS_DIR = "docs"
 OUTPUT_DIR = "output/data"
-REPORTES_DIR = "output/reportes"
-REGLAS_PATH = "reglas_campos.json"
+RULES_PATH = "fields_rules.json"
+UNKNOWN_PATH = "fields_unknown.json"
+SUGGEST_PATH = "suggest.txt"
 
 REGEX_MARCA = re.compile(r"^\d{9}$")
-REGEX_LABEL = re.compile(r"^([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9\s\(\)/]*?):\s*(.*)$")
-REGEX_NCL = re.compile(r"^NCL\(\d+\)$", re.IGNORECASE)
+REGEX_LABEL = re.compile(r"^([A-ZÀ-Ý][A-Za-zÀ-ÿ0-9\s\(\)/]*?):\s*(.*)$")
 REGEX_FECHA_PUB = re.compile(r"RPI\s+\d+\s+de\s+(\d{2}/\d{2}/\d{4})")
-REGEX_ESTADO = re.compile(
-    r"^(Publica[çc][ãa]o\s+de|Exig[êe]ncia\s+formal)", re.IGNORECASE
-)
 
-# Claves que el script reconoce sin estar en reglas_campos.json
-CLAVES_CONOCIDAS = {
+# Claves estructurales que no vienen de fields_rules.json
+CLAVES_ESTRUCTURALES = {
     "marca",
     "fecha_publicacion",
     "pagina_pdf",
     "pagina_fin",
-    "estado",
-    "ncl",
-    "text_logo",
-    "tiene_logo",
-    "campos_desconocidos",
     "pdf_origen",
+    "event_text",
+    "text_logo",
+    "has_logo",
 }
 
 
@@ -46,32 +41,69 @@ def normalizar_clave(texto):
     return re.sub(r"[^a-zA-Z0-9]+", "_", sin_tildes.lower()).strip("_")
 
 
-def cargar_reglas():
-    with open(REGLAS_PATH, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("campos_conocidos", {})
+# Cache de normalizar_clave por label repetido
+_NORM_CACHE = {}
 
 
-def es_label_conocido(clave_norm, reglas):
-    if clave_norm in CLAVES_CONOCIDAS:
-        return True
-    if clave_norm in reglas:
-        return True
-    if REGEX_NCL.match(clave_norm.replace(" ", "_").upper()) or clave_norm.startswith("ncl"):
-        return True
-    return False
+def normalizar_cache(texto):
+    v = _NORM_CACHE.get(texto)
+    if v is None:
+        v = normalizar_clave(texto)
+        _NORM_CACHE[texto] = v
+    return v
 
 
-def resolver_clave(label, reglas):
-    """Devuelve (clave_json, es_desconocido)."""
-    clave_norm = normalizar_clave(label)
-    if REGEX_NCL.match(label.strip()) or clave_norm.startswith("ncl"):
-        return "ncl", False
-    if clave_norm in reglas:
-        return reglas[clave_norm], False
-    if clave_norm in CLAVES_CONOCIDAS:
-        return clave_norm, False
-    return clave_norm, True
+def cargar_rules():
+    """Carga fields_rules.json → dict por parsed_field (lookup O(1)).
+    Compila los campos 'regex' una sola vez para fallback."""
+    if not os.path.isfile(RULES_PATH):
+        return {}, []
+    with open(RULES_PATH, "r", encoding="utf-8") as f:
+        rules = json.load(f)
+    regex_rules = []
+    for key, entry in rules.items():
+        pat = entry.get("regex")
+        if pat:
+            regex_rules.append((re.compile(pat), entry))
+    return rules, regex_rules
+
+
+def cargar_unknown():
+    """Carga fields_unknown.json si existe → dict por parsed_field."""
+    if not os.path.isfile(UNKNOWN_PATH):
+        return {}
+    with open(UNKNOWN_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def registrar_unknown(unknowns, parsed, raw_field, page, valor, archivo):
+    """Agrega 1 entrada por campo desconocido (dedup por parsed)."""
+    if parsed in unknowns:
+        return
+    unknowns[parsed] = {
+        "raw_field": raw_field,
+        "page": page,
+        "value_example": valor[:200],
+        "file": archivo,
+    }
+
+
+def resolver_campo(label, rules, regex_rules=()):
+    """
+    Devuelve (key_field, parsed, es_desconocido).
+    1) Lookup exacto por forma parseada (normalizar_clave).
+    2) Fallback: regex de fields_rules (ej. ncl_\\d+).
+    """
+    parsed = normalizar_cache(label)
+    entry = rules.get(parsed)
+    if entry:
+        return entry.get("key_field", parsed), parsed, False
+    for rx, entry in regex_rules:
+        if rx.match(parsed):
+            return entry.get("key_field", parsed), parsed, False
+    if parsed in CLAVES_ESTRUCTURALES:
+        return parsed, parsed, False
+    return parsed, parsed, True
 
 
 def extraer_fecha_pub(doc):
@@ -84,11 +116,10 @@ def extraer_fecha_pub(doc):
 
 def detectar_columnas(lineas, umbral_prev=None):
     """
-    Detecta X dinámicas a partir de líneas con:
+    Detecta X dinámicas:
       - ^\\d{9}$  → columna marca
-      - Etiqueta: → columna contenido (solo a la derecha de la marca)
+      - Etiqueta: → columna contenido (a la derecha de la marca)
       - zona derecha → text_logo
-    Devuelve (umbral, x0_logo).
     """
     x0_marcas = []
     x0_labels = []
@@ -103,15 +134,12 @@ def detectar_columnas(lineas, umbral_prev=None):
 
     if x0_marcas:
         x0_marca = min(x0_marcas)
-        # Labels que están a la derecha de la columna marca (descarta intro izq.)
         cont = [x for x in x0_labels if x > x0_marca + 40]
         x0_cont = min(cont) if cont else x0_marca + 64.2
     elif umbral_prev is not None:
-        # Página de continuación sin marca: reutilizar umbral anterior
         x0_marca = umbral_prev - 30
         x0_cont = umbral_prev + 30
     else:
-        # Sin marcas ni umbral previo: usar mediana de labels como contenido
         if x0_labels:
             xs = sorted(x0_labels)
             x0_cont = xs[len(xs) // 2]
@@ -119,11 +147,9 @@ def detectar_columnas(lineas, umbral_prev=None):
             x0_cont = 133.7
         x0_marca = x0_cont - 64.2
 
-    # Umbral cerca de la columna de contenido: deja fuera líneas intro intermedias
     umbral = x0_cont - 25.0
     if umbral <= x0_marca:
         umbral = (x0_marca + x0_cont) / 2.0
-    # Zona logo: contenido + margen amplio (típ. 441 vs 133)
     x0_logo = x0_cont + 280.0
     return umbral, x0_logo
 
@@ -151,54 +177,41 @@ class Registro:
             "fecha_publicacion": fecha_pub,
             "pagina_pdf": pagina_ini,
             "pdf_origen": pdf_origen,
+            "has_logo": False,
         }
-        self.ultimo_campo = None  # clave JSON del campo multilínea abierto
-        self.ultimo_es_desconocido = False
-        self.campos_desconocidos = {}  # clave_norm -> valor
-        self.labels_desconocidos = {}  # clave_norm -> {label_original, ejemplos}
+        self.ultimo_campo = None  # key_field del campo multilínea abierto
+        self.swallowing = False   # tragando continuaciones de campo unknown
+        self.event_text_set = False
+        self.text_counter = 0
         self.pagina_fin = pagina_ini
 
-    def set_campo(self, clave, valor, es_desconocido, label_original=None):
-        if clave == "ncl":
-            if "ncl" in self.datos:
-                actual = self.datos["ncl"]
-                if isinstance(actual, list):
-                    actual.append(valor)
-                else:
-                    self.datos["ncl"] = [actual, valor]
-            else:
-                self.datos["ncl"] = valor
-            self.ultimo_campo = "ncl"
-            self.ultimo_es_desconocido = False
-            return
+    def set_event_text(self, texto):
+        self.datos["event_text"] = texto
+        self.event_text_set = True
+        self.ultimo_campo = None
 
-        if es_desconocido:
-            if clave in self.campos_desconocidos:
-                self.campos_desconocidos[clave] += " " + valor
+    def set_campo(self, key_field, valor):
+        if key_field in self.datos and key_field not in CLAVES_ESTRUCTURALES:
+            # Merge en lista si la key ya existe (ej. ncl_11 + ncl_13 → ncl)
+            actual = self.datos[key_field]
+            if isinstance(actual, list):
+                actual.append(valor)
             else:
-                self.campos_desconocidos[clave] = valor
-            if clave not in self.labels_desconocidos:
-                self.labels_desconocidos[clave] = {
-                    "label_original": label_original or clave,
-                    "ejemplo_valor": valor,
-                }
-            self.ultimo_campo = clave
-            self.ultimo_es_desconocido = True
-            return
+                self.datos[key_field] = [actual, valor]
+        else:
+            self.datos[key_field] = valor
+        self.ultimo_campo = key_field
+        self.swallowing = False
 
-        self.datos[clave] = valor
-        self.ultimo_campo = clave
-        self.ultimo_es_desconocido = False
+    def start_swallow(self):
+        """Campo unknown: traga sus continuaciones hasta el próximo label."""
+        self.ultimo_campo = None
+        self.swallowing = True
 
     def anexar_continuacion(self, texto):
-        """Anexa línea sin label al último campo abierto (conocido o desconocido)."""
+        """Anexa línea sin label al último campo abierto. Nunca genera text_x."""
         if self.ultimo_campo is None:
             return False
-        if self.ultimo_es_desconocido:
-            if self.ultimo_campo not in self.campos_desconocidos:
-                return False
-            self.campos_desconocidos[self.ultimo_campo] += " " + texto
-            return True
         actual = self.datos.get(self.ultimo_campo)
         if actual is None:
             return False
@@ -208,52 +221,20 @@ class Registro:
             self.datos[self.ultimo_campo] = (actual + " " + texto).strip()
         return True
 
-    def finalizar(self):
-        if self.campos_desconocidos:
-            self.datos["campos_desconocidos"] = self.campos_desconocidos
-        return self.datos
+    def add_text_orphan(self, texto):
+        """Texto huérfano sin label y sin campo abierto → text_N."""
+        self.text_counter += 1
+        self.datos[f"text_{self.text_counter}"] = texto
 
 
 def guardar_registro(reg, output_dir):
     marca = reg.datos["marca"]
     ruta = os.path.join(output_dir, f"{marca}.json")
-    datos = reg.finalizar()
     with open(ruta, "w", encoding="utf-8") as f:
-        json.dump(datos, f, ensure_ascii=False, indent=2)
+        json.dump(reg.datos, f, ensure_ascii=False, indent=2)
 
 
-def extraer_imagenes(pagina, doc, marca, output_dir):
-    """Extrae imágenes de la página y las asocia por posición vertical a la marca."""
-    imagenes = []
-    for img_info in pagina.get_images(full=True):
-        xref = img_info[0]
-        for rect in pagina.get_image_rects(xref):
-            if rect.width > 15 and rect.height > 15:
-                imagenes.append({"xref": xref, "y0": rect.y0})
-
-    if not imagenes:
-        return False
-
-    # Asociar por y0: la imagen debe estar en el rango de la marca
-    # (desde y0 de la marca hasta el fin de página o siguiente marca)
-    # Simplificado: tomar la imagen más cercana por debajo de la y de la marca
-    # En la práctica cada marca tiene su logo en su bloque
-    try:
-        # Usar la primera imagen como logo de la marca actual
-        # (en RPI cada registro tiene un logo)
-        img = imagenes[0]
-        pix = pymupdf.Pixmap(doc, img["xref"])
-        if pix.n - pix.alpha > 3:
-            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
-        ruta_png = os.path.join(output_dir, f"{marca}.png")
-        pix.save(ruta_png)
-        return True
-    except Exception as e:
-        print(f"  Error guardando imagen de {marca}: {e}")
-        return False
-
-
-def procesar_pdf(ruta_pdf, output_dir, reporte_acumulado, max_pag=None):
+def procesar_pdf(ruta_pdf, output_dir, rules, regex_rules, unknowns, max_pag=None):
     nombre_pdf = os.path.basename(ruta_pdf)
     print(f"\n=== Procesando {nombre_pdf} ===")
     doc = pymupdf.open(ruta_pdf)
@@ -276,7 +257,6 @@ def procesar_pdf(ruta_pdf, output_dir, reporte_acumulado, max_pag=None):
         umbral_prev = umbral
         alto = pagina.rect.height
 
-        # Recopilar imágenes de la página con su y0
         imgs_pagina = []
         for img_info in pagina.get_images(full=True):
             xref = img_info[0]
@@ -284,10 +264,9 @@ def procesar_pdf(ruta_pdf, output_dir, reporte_acumulado, max_pag=None):
                 if rect.width > 15 and rect.height > 15:
                     imgs_pagina.append({"xref": xref, "y0": rect.y0})
 
-        marcas_en_pagina = []  # (y0, registro) para asociar logos
+        marcas_en_pagina = []
 
         for x0, y0, texto in lineas:
-            # Ignorar encabezado y pie
             if y0 < 50 or y0 > alto - 40:
                 continue
 
@@ -300,69 +279,50 @@ def procesar_pdf(ruta_pdf, output_dir, reporte_acumulado, max_pag=None):
             # Columna izquierda: número de marca
             if x0 < umbral:
                 if REGEX_MARCA.match(texto.strip()):
-                    # Guardar registro anterior
                     if registro_actual:
                         guardar_registro(registro_actual, output_dir)
                         total_registros += 1
-                    registro_actual = Registro(texto.strip(), fecha_pub, num_pag + 1, nombre_pdf)
+                    registro_actual = Registro(
+                        texto.strip(), fecha_pub, num_pag + 1, nombre_pdf
+                    )
                     marcas_en_pagina.append((y0, registro_actual))
-                # Otros textos izquierdos (intro legal) se ignoran
                 continue
 
             # Columna de contenido
             if registro_actual is None:
-                # Contenido antes de cualquier marca (intro) → ignorar
                 continue
 
             registro_actual.pagina_fin = num_pag + 1
 
             m = REGEX_LABEL.match(texto)
             if m:
+                # 1. Línea con label → resolución por fields_rules
                 label = m.group(1).strip()
                 valor = m.group(2).strip()
-                clave, es_desc = resolver_clave(label, cargar_reglas_cache())
-                registro_actual.set_campo(clave, valor, es_desc, label_original=label)
+                key_field, parsed, es_desc = resolver_campo(label, rules, regex_rules)
                 if es_desc:
-                    reporte_acumulado.setdefault(
-                        clave,
-                        {
-                            "label_original": label,
-                            "clave_normalizada": clave,
-                            "apariciones": 0,
-                            "ejemplo_valor": valor,
-                            "ejemplo_marca": registro_actual.datos["marca"],
-                            "ejemplo_pagina": num_pag + 1,
-                            "pdf": nombre_pdf,
-                        },
+                    registrar_unknown(
+                        unknowns, parsed, label, num_pag + 1, valor, nombre_pdf
                     )
-                    reporte_acumulado[clave]["apariciones"] += 1
-            elif REGEX_ESTADO.match(texto):
-                # Línea de estado (Publicação de..., etc.)
-                if "estado" not in registro_actual.datos:
-                    registro_actual.datos["estado"] = texto
-                    registro_actual.ultimo_campo = None
-                    registro_actual.ultimo_es_desconocido = False
+                    # Tragar campo unknown + sus continuaciones
+                    registro_actual.start_swallow()
+                else:
+                    registro_actual.set_campo(key_field, valor)
+            elif registro_actual.swallowing:
+                # Continuación de campo unknown → tragar, no va a marca.json
+                pass
+            elif (
+                not registro_actual.event_text_set
+                and registro_actual.ultimo_campo is None
+            ):
+                # 2. Primera línea sin label de bloque nuevo → event_text
+                registro_actual.set_event_text(texto)
+            elif registro_actual.anexar_continuacion(texto):
+                # 3. Continuación de campo multilínea/página → NUNCA text_x
+                pass
             else:
-                # Línea sin label → continuación de campo multilínea
-                if not registro_actual.anexar_continuacion(texto):
-                    # Campo huérfano → reportar
-                    clave_huerfana = f"linea_sin_label_p{num_pag + 1}"
-                    reporte_acumulado.setdefault(
-                        f"sin_label_{registro_actual.datos['marca']}_{num_pag + 1}",
-                        {
-                            "label_original": None,
-                            "clave_normalizada": "linea_sin_label",
-                            "apariciones": 0,
-                            "ejemplo_valor": texto[:120],
-                            "ejemplo_marca": registro_actual.datos["marca"],
-                            "ejemplo_pagina": num_pag + 1,
-                            "pdf": nombre_pdf,
-                            "tipo": "bloque_sin_label",
-                        },
-                    )
-                    reporte_acumulado[
-                        f"sin_label_{registro_actual.datos['marca']}_{num_pag + 1}"
-                    ]["apariciones"] += 1
+                # 4. Huérfana → text_N
+                registro_actual.add_text_orphan(texto)
 
         # Asociar logos de esta página a las marcas
         if imgs_pagina and marcas_en_pagina:
@@ -387,12 +347,11 @@ def procesar_pdf(ruta_pdf, output_dir, reporte_acumulado, max_pag=None):
                             output_dir, f"{propietario.datos['marca']}.png"
                         )
                         pix.save(ruta_png)
-                        propietario.datos["tiene_logo"] = True
+                        propietario.datos["has_logo"] = True
                         total_logos += 1
                     except Exception as e:
                         print(f"  Error imagen {propietario.datos['marca']}: {e}")
 
-    # Guardar último registro
     if registro_actual:
         guardar_registro(registro_actual, output_dir)
         total_registros += 1
@@ -403,33 +362,33 @@ def procesar_pdf(ruta_pdf, output_dir, reporte_acumulado, max_pag=None):
     return total_registros, total_logos
 
 
-# Cache de reglas para no releer el JSON en cada línea
-_REGLAS_CACHE = None
+def escribir_unknown_y_suggest(unknowns):
+    """Escribe fields_unknown.json y suggest.txt (solo si hay unknowns)."""
+    if not unknowns:
+        if os.path.isfile(UNKNOWN_PATH):
+            os.remove(UNKNOWN_PATH)
+        if os.path.isfile(SUGGEST_PATH):
+            os.remove(SUGGEST_PATH)
+        print("\nSin campos desconocidos nuevos.")
+        return
 
+    with open(UNKNOWN_PATH, "w", encoding="utf-8") as f:
+        json.dump(unknowns, f, ensure_ascii=False, indent=2)
 
-def cargar_reglas_cache():
-    global _REGLAS_CACHE
-    if _REGLAS_CACHE is None:
-        _REGLAS_CACHE = cargar_reglas()
-    return _REGLAS_CACHE
+    lineas = [
+        "Nuevos fields detectados - agregar a fields_rules.json y re-ejecutar:",
+        "",
+    ]
+    for parsed, info in unknowns.items():
+        lineas.append(
+            f"  - {parsed} | raw: \"{info['raw_field']}\" "
+            f"| pag {info['page']} | {info['file']}"
+        )
+    with open(SUGGEST_PATH, "w", encoding="utf-8") as f:
+        f.write("\n".join(lineas) + "\n")
 
-
-def escribir_reporte(reporte, reportes_dir):
-    os.makedirs(reportes_dir, exist_ok=True)
-    ruta = os.path.join(reportes_dir, "desconocidos.json")
-    salida = {
-        "fecha_ejecucion": datetime.now().isoformat(timespec="seconds"),
-        "total_tipos_desconocidos": len(reporte),
-        "campos": [v for v in reporte.values() if v.get("tipo") != "bloque_sin_label"],
-        "bloques_sin_label": [
-            v for v in reporte.values() if v.get("tipo") == "bloque_sin_label"
-        ],
-    }
-    with open(ruta, "w", encoding="utf-8") as f:
-        json.dump(salida, f, ensure_ascii=False, indent=2)
-    print(f"\nReporte escrito: {ruta}")
-    print(f"  Campos desconocidos: {len(salida['campos'])}")
-    print(f"  Bloques sin label: {len(salida['bloques_sin_label'])}")
+    print(f"\nUnknowns escritos: {UNKNOWN_PATH} ({len(unknowns)})")
+    print(f"Sugerencia escrita: {SUGGEST_PATH}")
 
 
 def main():
@@ -443,9 +402,7 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    os.makedirs(REPORTES_DIR, exist_ok=True)
 
-    # Descubrir PDFs en docs/
     if not os.path.isdir(DOCS_DIR):
         print(f"No existe el directorio {DOCS_DIR}/")
         return
@@ -465,21 +422,24 @@ def main():
             print(f"No hay PDFs en {DOCS_DIR}/")
             return
 
+    rules, regex_rules = cargar_rules()
+    unknowns = cargar_unknown()
+    print(f"Rules cargadas: {len(rules)} campos ({len(regex_rules)} con regex)")
     print(f"PDFs a procesar: {len(pdfs)}")
-    reporte_acumulado = {}
+
     total_regs = 0
     total_imgs = 0
 
     for nombre in pdfs:
         ruta = os.path.join(DOCS_DIR, nombre)
         try:
-            r, i = procesar_pdf(ruta, OUTPUT_DIR, reporte_acumulado)
+            r, i = procesar_pdf(ruta, OUTPUT_DIR, rules, regex_rules, unknowns)
             total_regs += r
             total_imgs += i
         except Exception as e:
             print(f"  ERROR procesando {nombre}: {e}")
 
-    escribir_reporte(reporte_acumulado, REPORTES_DIR)
+    escribir_unknown_y_suggest(unknowns)
     print(f"\n=== TOTAL ===")
     print(f"Registros: {total_regs}")
     print(f"Logos: {total_imgs}")

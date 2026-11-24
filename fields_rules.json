@@ -1,0 +1,19 @@
+{
+  "titular": { "key_field": "titular", "raw_field": "Titular" },
+  "data_de_deposito": { "key_field": "fecha_deposito", "raw_field": "Data de depósito" },
+  "data_de_recebimento_pelo_inpi": { "key_field": "fecha_recepcion_inpi", "raw_field": "Data de recebimento pelo INPI" },
+  "numero_da_inscricao_internacional": { "key_field": "inscripcion_internacional", "raw_field": "Número da Inscrição Internacional" },
+  "apresentacao": { "key_field": "presentacion", "raw_field": "Apresentação" },
+  "natureza": { "key_field": "naturaleza", "raw_field": "Natureza" },
+  "elemento_nominativo": { "key_field": "elemento_nominativo", "raw_field": "Elemento nominativo" },
+  "cfe": { "key_field": "clasificacion_viena", "raw_field": "CFE" },
+  "ncl": { "key_field": "ncl", "raw_field": "NCL", "regex": "^ncl_\\d+$" },
+  "especificacao": { "key_field": "especificacion", "raw_field": "Especificação" },
+  "especificacao_traduzida": { "key_field": "especificacion_traducida", "raw_field": "Especificação traduzida" },
+  "procurador": { "key_field": "procurador", "raw_field": "Procurador" },
+  "prioridade_unionista": { "key_field": "prioridad_unionista", "raw_field": "Prioridade unionista" },
+  "apostila": { "key_field": "apostilla", "raw_field": "Apostila" },
+  "motivo_do_indeferimento": { "key_field": "motivo_rechazo", "raw_field": "Motivo do indeferimento" },
+  "protocolo": { "key_field": "protocolo", "raw_field": "Protocolo" },
+  "detalhes_do_despacho": { "key_field": "detalhes_do_despacho", "raw_field": "Detalhes do despacho" }
+}
