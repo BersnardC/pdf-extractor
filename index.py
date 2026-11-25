@@ -18,6 +18,7 @@ SUGGEST_PATH = "suggest.txt"
 REGEX_MARCA = re.compile(r"^\d{9}$")
 REGEX_LABEL = re.compile(r"^([A-ZÀ-Ý][A-Za-zÀ-ÿ0-9\s\(\)/]*?):\s*(.*)$")
 REGEX_FECHA_PUB = re.compile(r"RPI\s+\d+\s+de\s+(\d{2}/\d{2}/\d{4})")
+MAX_LABEL_WORDS = 5
 
 # Claves estructurales que no vienen de fields_rules.json
 CLAVES_ESTRUCTURALES = {
@@ -27,7 +28,7 @@ CLAVES_ESTRUCTURALES = {
     "pagina_fin",
     "pdf_origen",
     "event_text",
-    "text_logo",
+    "logo_text",
     "has_logo",
 }
 
@@ -94,6 +95,7 @@ def resolver_campo(label, rules, regex_rules=()):
     Devuelve (key_field, parsed, es_desconocido).
     1) Lookup exacto por forma parseada (normalizar_clave).
     2) Fallback: regex de fields_rules (ej. ncl_\\d+).
+    3) Bootstrap: si rules vacío, aceptar el label como field (key=parsed).
     """
     parsed = normalizar_cache(label)
     entry = rules.get(parsed)
@@ -103,6 +105,9 @@ def resolver_campo(label, rules, regex_rules=()):
         if rx.match(parsed):
             return entry.get("key_field", parsed), parsed, False
     if parsed in CLAVES_ESTRUCTURALES:
+        return parsed, parsed, False
+    if not rules:
+        # Bootstrap sin fields_rules.json: el patrón del label ya es válido
         return parsed, parsed, False
     return parsed, parsed, True
 
@@ -120,7 +125,7 @@ def detectar_columnas(lineas, umbral_prev=None):
     Detecta X dinámicas:
       - ^\\d{9}$  → columna marca
       - Etiqueta: → columna contenido (a la derecha de la marca)
-      - zona derecha → text_logo
+      - zona derecha → logo_text
     """
     x0_marcas = []
     x0_labels = []
@@ -185,6 +190,7 @@ class Registro:
         self.event_text_set = False
         self.text_counter = 0
         self.pagina_fin = pagina_ini
+        self.ya_guardado = False  # ya se escribió a disco (re-guardar tras logos)
 
     def set_event_text(self, texto):
         self.datos["event_text"] = texto
@@ -230,6 +236,7 @@ class Registro:
 
 def guardar_registro(reg, output_dir):
     marca = reg.datos["marca"]
+    reg.datos["pagina_fin"] = reg.pagina_fin
     ruta = os.path.join(output_dir, f"{marca}.json")
     with open(ruta, "w", encoding="utf-8") as f:
         json.dump(reg.datos, f, ensure_ascii=False, indent=2)
@@ -244,9 +251,26 @@ def procesar_pdf(ruta_pdf, output_dir, rules, regex_rules, unknowns, max_pag=Non
 
     registro_actual = None
     total_registros = 0
-    total_logos = 0
+    total_pngs = 0
+    total_has_logo = 0
     umbral_prev = None
     fin = min(max_pag, len(doc)) if max_pag else len(doc)
+
+    marcas_con_logo = set()
+
+    def _contar_logo(reg):
+        nonlocal total_has_logo
+        m = reg.datos["marca"]
+        if reg.datos.get("has_logo") and m not in marcas_con_logo:
+            marcas_con_logo.add(m)
+            total_has_logo += 1
+
+    def _guardar(reg):
+        nonlocal total_registros
+        guardar_registro(reg, output_dir)
+        reg.ya_guardado = True
+        total_registros += 1
+        _contar_logo(reg)
 
     for num_pag in range(fin):
         pagina = doc[num_pag]
@@ -258,12 +282,30 @@ def procesar_pdf(ruta_pdf, output_dir, rules, regex_rules, unknowns, max_pag=Non
         umbral_prev = umbral
         alto = pagina.rect.height
 
+        # Imágenes raster en zona del logo (X)
         imgs_pagina = []
         for img_info in pagina.get_images(full=True):
             xref = img_info[0]
             for rect in pagina.get_image_rects(xref):
-                if rect.width > 15 and rect.height > 15:
-                    imgs_pagina.append({"xref": xref, "y0": rect.y0})
+                if rect.width > 15 and rect.height > 15 and rect.x0 >= x0_logo - 20:
+                    imgs_pagina.append(
+                        {
+                            "xref": xref,
+                            "y0": rect.y0,
+                            "y1": rect.y1,
+                            "yc": (rect.y0 + rect.y1) / 2,
+                        }
+                    )
+        # Vectores grandes en zona del logo (logo vectorial, sin PNG)
+        vectores_pagina = []
+        for d in pagina.get_drawings():
+            r = d["rect"]
+            if (
+                r.x0 >= x0_logo - 20
+                and 15 < r.width < 200
+                and 15 < r.height < 200
+            ):
+                vectores_pagina.append({"y0": r.y0, "y1": r.y1, "yc": (r.y0 + r.y1) / 2})
 
         marcas_en_pagina = []
 
@@ -274,15 +316,15 @@ def procesar_pdf(ruta_pdf, output_dir, rules, regex_rules, unknowns, max_pag=Non
             # Zona logo (texto lateral)
             if x0 >= x0_logo:
                 if registro_actual:
-                    registro_actual.datos["text_logo"] = texto
+                    registro_actual.datos["logo_text"] = texto
+                    registro_actual.datos["has_logo"] = True
                 continue
 
             # Columna izquierda: número de marca
             if x0 < umbral:
                 if REGEX_MARCA.match(texto.strip()):
                     if registro_actual:
-                        guardar_registro(registro_actual, output_dir)
-                        total_registros += 1
+                        _guardar(registro_actual)
                     registro_actual = Registro(
                         texto.strip(), fecha_pub, num_pag + 1, nombre_pdf
                     )
@@ -296,8 +338,8 @@ def procesar_pdf(ruta_pdf, output_dir, rules, regex_rules, unknowns, max_pag=Non
             registro_actual.pagina_fin = num_pag + 1
 
             m = REGEX_LABEL.match(texto)
-            if m:
-                # 1. Línea con label → resolución por fields_rules
+            if m and len(m.group(1).split()) <= MAX_LABEL_WORDS:
+                # 1. Línea con label (≤5 palabras) → resolución por fields_rules
                 label = m.group(1).strip()
                 valor = m.group(2).strip()
                 key_field, parsed, es_desc = resolver_campo(label, rules, regex_rules)
@@ -326,41 +368,55 @@ def procesar_pdf(ruta_pdf, output_dir, rules, regex_rules, unknowns, max_pag=Non
                 registro_actual.add_text_orphan(texto)
 
         # Asociar logos de esta página a las marcas
-        if imgs_pagina and marcas_en_pagina:
-            marcas_en_pagina.sort(key=lambda t: t[0])
-            for img in imgs_pagina:
-                propietario = None
+        def _dueno(yc):
+            if marcas_en_pagina:
                 for i, (y_marca, reg) in enumerate(marcas_en_pagina):
                     y_fin = (
                         marcas_en_pagina[i + 1][0]
                         if i + 1 < len(marcas_en_pagina)
                         else alto
                     )
-                    if y_marca - 10 <= img["y0"] < y_fin:
-                        propietario = reg
-                        break
-                if propietario:
-                    try:
-                        pix = pymupdf.Pixmap(doc, img["xref"])
-                        if pix.n - pix.alpha > 3:
-                            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
-                        ruta_png = os.path.join(
-                            output_dir, f"{propietario.datos['marca']}.png"
-                        )
-                        pix.save(ruta_png)
-                        propietario.datos["has_logo"] = True
-                        total_logos += 1
-                    except Exception as e:
-                        print(f"  Error imagen {propietario.datos['marca']}: {e}")
+                    if y_marca - 40 <= yc < y_fin:
+                        return reg
+                return None
+            # Página de continuación sin nº de marca
+            return registro_actual
+
+        for v in vectores_pagina:
+            reg = _dueno(v["yc"])
+            if reg:
+                reg.datos["has_logo"] = True
+
+        for img in imgs_pagina:
+            propietario = _dueno(img["yc"])
+            if propietario:
+                try:
+                    pix = pymupdf.Pixmap(doc, img["xref"])
+                    if pix.n - pix.alpha > 3:
+                        pix = pymupdf.Pixmap(pymupdf.csRGB, pix)
+                    ruta_png = os.path.join(
+                        output_dir, f"{propietario.datos['marca']}.png"
+                    )
+                    pix.save(ruta_png)
+                    propietario.datos["has_logo"] = True
+                    total_pngs += 1
+                except Exception as e:
+                    print(f"  Error imagen {propietario.datos['marca']}: {e}")
+
+        # Refrescar en disco los registros ya guardados ANTES de asignar logos
+        # (2 marcas en la misma página: la 1ª se guarda al ver la 2ª, sin logos aún)
+        for _y, reg in marcas_en_pagina:
+            if reg.ya_guardado:
+                guardar_registro(reg, output_dir)
+                _contar_logo(reg)
 
     if registro_actual:
-        guardar_registro(registro_actual, output_dir)
-        total_registros += 1
+        _guardar(registro_actual)
 
     doc.close()
     print(f"  Registros guardados: {total_registros}")
-    print(f"  Logos extraídos: {total_logos}")
-    return total_registros, total_logos
+    print(f"  Logos: {total_has_logo} (PNG: {total_pngs})")
+    return total_registros, total_pngs, total_has_logo
 
 
 def escribir_unknown_y_suggest(unknowns):
@@ -448,20 +504,28 @@ def main():
     rules, regex_rules = cargar_rules()
     unknowns = cargar_unknown()
     print(f"Rules cargadas: {len(rules)} campos ({len(regex_rules)} con regex)")
+    if not rules:
+        print(
+            "AVISO: fields_rules.json ausente o vacío — "
+            "bootstrap: los labels (≤5 palabras) se aceptan como field; "
+            "edita fields_rules.json para renombrar key_field."
+        )
     print(f"Carpeta: {carpeta}")
     print(f"PDFs a procesar: {len(nombres)}")
 
     total_regs = 0
-    total_imgs = 0
+    total_pngs = 0
+    total_has_logo = 0
     t_total = time.perf_counter()
 
     for nombre in nombres:
         ruta = os.path.join(carpeta, nombre)
         t0 = time.perf_counter()
         try:
-            r, i = procesar_pdf(ruta, OUTPUT_DIR, rules, regex_rules, unknowns)
+            r, p, h = procesar_pdf(ruta, OUTPUT_DIR, rules, regex_rules, unknowns)
             total_regs += r
-            total_imgs += i
+            total_pngs += p
+            total_has_logo += h
         except Exception as e:
             print(f"  ERROR procesando {nombre}: {e}")
         dt = time.perf_counter() - t0
@@ -471,7 +535,7 @@ def main():
     escribir_unknown_y_suggest(unknowns)
     print(f"\n=== TOTAL ===")
     print(f"Registros: {total_regs}")
-    print(f"Logos: {total_imgs}")
+    print(f"Logos: {total_has_logo} (PNG: {total_pngs})")
     print(f"[tiempo] Total: {dt_total:.2f}s ({len(nombres)} PDFs)")
     print(f"Salida: {OUTPUT_DIR}/")
 

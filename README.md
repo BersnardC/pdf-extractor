@@ -88,6 +88,17 @@ Cada entrada usa la forma parseada del label como clave (tras normalizar: minús
 
 Los campos unknown **no** se incluyen en `<marca>.json`; sus líneas de continuación se descartan hasta el siguiente label conocido.
 
+### Reglas de detección de label
+
+Una línea se considera label si:
+
+1. Está en la columna de contenido
+2. Inicia con **mayúscula**
+3. Contiene `:`
+4. El label (parto antes de `:`) tiene **máximo 5 palabras**
+
+Si `fields_rules.json` no existe o está vacío, el script entra en **bootstrap**: todos los labels que cumplan estas reglas se aceptan como field con `key_field` = forma parseada (ej. `data_de_deposito`). Edita `fields_rules.json` después para renombrar (`fecha_deposito`, etc.).
+
 ## Campos de salida
 
 Cada `<marca>.json` incluye:
@@ -103,8 +114,8 @@ Cada `<marca>.json` incluye:
 | `ncl` | Clasificación NCL (lista si hay varias) |
 | `especificacion` | Texto multilínea, puede cruzar páginas |
 | `text_N` | Líneas huérfanas sin label (`text_1`, `text_2`, ...) |
-| `text_logo` | Texto detectado en la zona del logo (si existe) |
-| `has_logo` | `true` / `false` — si se extrajo el logo PNG |
+| `logo_text` | Texto detectado en la zona del logo (wordmark, si existe) |
+| `has_logo` | `true` / `false` — imagen raster (PNG), wordmark (`logo_text`) o vector en zona logo |
 
 ## Notas
 
