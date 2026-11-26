@@ -1,0 +1,47 @@
+{
+  "apresentacao": {
+    "key_field": "apresentacao",
+    "raw_field": "Apresentação"
+  },
+  "cfe": {
+    "key_field": "cfe",
+    "raw_field": "CFE"
+  },
+  "data_de_deposito": {
+    "key_field": "data_de_deposito",
+    "raw_field": "Data de depósito"
+  },
+  "data_de_recebimento_pelo_inpi": {
+    "key_field": "data_de_recebimento_pelo_inpi",
+    "raw_field": "Data de recebimento pelo INPI"
+  },
+  "elemento_nominativo": {
+    "key_field": "elemento_nominativo",
+    "raw_field": "Elemento nominativo"
+  },
+  "especificacao": {
+    "key_field": "especificacao",
+    "raw_field": "Especificação"
+  },
+  "especificacao_traduzida": {
+    "key_field": "especificacao_traduzida",
+    "raw_field": "Especificação traduzida"
+  },
+  "natureza": {
+    "key_field": "natureza",
+    "raw_field": "Natureza"
+  },
+  "ncl": {
+    "key_field": "ncl",
+    "raw_field": "NCL",
+    "regex": "^ncl_\\d+$"
+  },
+  "numero_da_inscricao_internacional": {
+    "key_field": "numero_da_inscricao_internacional",
+    "raw_field": "Número da Inscrição Internacional"
+  },
+  "titular": {
+    "key_field": "titular",
+    "raw_field": "Titular"
+  }
+}
