@@ -37,10 +37,14 @@ python index.py --folder D:\otra\carpeta
 
 # Varios PDFs de otra carpeta
 python index.py --folder D:\otra\carpeta --files a.pdf,b.pdf
+
+# Modo no estricto: aceptar labels fuera de rules (aparecen en suggest.txt)
+python index.py --strict false
 ```
 
 - `--folder` y `--file` / `--files` se pueden combinar.
 - `--file` y `--files` son mutuamente excluyentes.
+- `--strict` (default `true`): `true` = solo fields de `fields_rules.json`; `false` = rules + labels que cumplan el patrón (`key_field` = parsed, también se reportan en `suggest.txt`).
 - La salida siempre se escribe en `output/data/` del proyecto.
 
 ### Descubrir fields (`parse_fields.py`)
@@ -67,10 +71,10 @@ entrada** con `"regex": "^ncl_\\d+$"` en lugar de listar cada variante.
 ```
 docs/                    PDFs de entrada (default)
 fields_rules.json        Fields conocidos (fuente de verdad)
-fields_unknown.json      Generado: campos desconocidos detectados
-suggest.txt              Generado: qué agregar a fields_rules.json
-parsed_fields.json       Generado: reporte de parse_fields (potenciales fields)
+output/fields_unknown.json  Generado: campos desconocidos detectados
+output/suggest.txt       Generado: qué agregar a fields_rules.json
 output/data/             <marca>.json + <marca>.png
+parsed_fields.json       Generado: reporte de parse_fields (potenciales fields)
 index.py                 Script principal
 parse_fields.py          Descubridor de fields por rango de páginas
 requirements.txt
@@ -101,10 +105,24 @@ Cada entrada usa la forma parseada del label como clave (tras normalizar: minús
 | `raw_field` | Texto original en el PDF (solo referencia / trazabilidad) |
 | `regex` | Opcional. Matchea familias de labels sin agregar cada variante (ej. `NCL(11)`, `NCL(12)`, ...) |
 
+### Estados de un label al procesar
+
+| Estado | Condición | En `<marca>.json` | En `suggest.txt` |
+|---|---|---|---|
+| `known` | en `fields_rules.json` (o regex/estructural) | ✅ `key_field` de rules | ❌ |
+| `auto` | fuera de rules pero aceptado (`--strict false` o bootstrap sin rules) | ✅ `key_field` = parsed | ✅ |
+| `unknown` | fuera de rules con `--strict true` (default) | ❌ (tragado) | ✅ |
+
+**Flujo del analista con `--strict false`:**
+
+1. Correr → campos nuevos entran al JSON **y** a `suggest.txt`
+2. Decidir cuáles promover a `fields_rules.json` (con su `key_field`)
+3. Re-correr → los promovidos usan `key_field` de rules y desaparecen de `suggest.txt`; el resto sigue reportado
+
 ### Flujo con campos desconocidos
 
 1. Correr `python index.py`
-2. Revisar `suggest.txt` (y `fields_unknown.json` para detalles)
+2. Revisar `output/suggest.txt` (y `output/fields_unknown.json` para detalles)
 3. Agregar los nuevos fields a `fields_rules.json`
 4. Re-correr el script
 
@@ -123,7 +141,7 @@ Una línea se considera label si:
 3. Contiene `:`
 4. El label (parto antes de `:`) tiene **máximo 5 palabras**
 
-Si `fields_rules.json` no existe o está vacío, el script entra en **bootstrap**: todos los labels que cumplan estas reglas se aceptan como field con `key_field` = forma parseada (ej. `data_de_deposito`). Edita `fields_rules.json` después para renombrar (`fecha_deposito`, etc.).
+Si `fields_rules.json` no existe o está vacío, el script entra en **bootstrap**: todos los labels que cumplan estas reglas se aceptan como field con `key_field` = forma parseada (ej. `data_de_deposito`) y **también se reportan** en `suggest.txt` (borrador para crear rules). Edita `fields_rules.json` después para renombrar (`fecha_deposito`, etc.).
 
 ## Campos de salida
 

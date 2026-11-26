@@ -15,10 +15,6 @@
     "key_field": "data_de_recebimento_pelo_inpi",
     "raw_field": "Data de recebimento pelo INPI"
   },
-  "detalhes_do_despacho": {
-    "key_field": "detalhes_do_despacho",
-    "raw_field": "Detalhes do despacho"
-  },
   "elemento_nominativo": {
     "key_field": "elemento_nominativo",
     "raw_field": "Elemento nominativo"
@@ -30,14 +26,6 @@
   "especificacao_traduzida": {
     "key_field": "especificacao_traduzida",
     "raw_field": "Especificação traduzida"
-  },
-  "exame_de_merito": {
-    "key_field": "exame_de_merito",
-    "raw_field": "Exame de mérito"
-  },
-  "exame_de_merito_de_designacao": {
-    "key_field": "exame_de_merito_de_designacao",
-    "raw_field": "Exame de mérito de designação"
   },
   "natureza": {
     "key_field": "natureza",
@@ -51,10 +39,6 @@
   "numero_da_inscricao_internacional": {
     "key_field": "numero_da_inscricao_internacional",
     "raw_field": "Número da Inscrição Internacional"
-  },
-  "procurador": {
-    "key_field": "procurador",
-    "raw_field": "Procurador"
   },
   "titular": {
     "key_field": "titular",

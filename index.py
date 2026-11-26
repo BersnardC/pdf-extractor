@@ -12,8 +12,8 @@ import pymupdf
 DOCS_DIR = "docs"
 OUTPUT_DIR = "output/data"
 RULES_PATH = "fields_rules.json"
-UNKNOWN_PATH = "fields_unknown.json"
-SUGGEST_PATH = "suggest.txt"
+UNKNOWN_PATH = os.path.join("output", "fields_unknown.json")
+SUGGEST_PATH = os.path.join("output", "suggest.txt")
 
 REGEX_MARCA = re.compile(r"^\d{9}$")
 REGEX_LABEL = re.compile(r"^([A-ZÀ-Ý][A-Za-zÀ-ÿ0-9\s\(\)/]*?):\s*(.*)$")
@@ -90,26 +90,26 @@ def registrar_unknown(unknowns, parsed, raw_field, page, valor, archivo):
     }
 
 
-def resolver_campo(label, rules, regex_rules=()):
+def resolver_campo(label, rules, regex_rules=(), strict=True):
     """
-    Devuelve (key_field, parsed, es_desconocido).
-    1) Lookup exacto por forma parseada (normalizar_clave).
-    2) Fallback: regex de fields_rules (ej. ncl_\\d+).
-    3) Bootstrap: si rules vacío, aceptar el label como field (key=parsed).
+    Devuelve (key_field, parsed, estado):
+      "known"   → en rules / regex / estructural → key_field de rules
+      "auto"    → fuera de rules pero aceptado (bootstrap o strict=false) → key=parsed
+      "unknown" → fuera de rules y strict=true → no entra al JSON
     """
     parsed = normalizar_cache(label)
     entry = rules.get(parsed)
     if entry:
-        return entry.get("key_field", parsed), parsed, False
+        return entry.get("key_field", parsed), parsed, "known"
     for rx, entry in regex_rules:
         if rx.match(parsed):
-            return entry.get("key_field", parsed), parsed, False
+            return entry.get("key_field", parsed), parsed, "known"
     if parsed in CLAVES_ESTRUCTURALES:
-        return parsed, parsed, False
-    if not rules:
-        # Bootstrap sin fields_rules.json: el patrón del label ya es válido
-        return parsed, parsed, False
-    return parsed, parsed, True
+        return parsed, parsed, "known"
+    if not rules or not strict:
+        # Bootstrap sin rules, o --strict false: aceptar el candidato
+        return parsed, parsed, "auto"
+    return parsed, parsed, "unknown"
 
 
 def extraer_fecha_pub(doc):
@@ -242,7 +242,9 @@ def guardar_registro(reg, output_dir):
         json.dump(reg.datos, f, ensure_ascii=False, indent=2)
 
 
-def procesar_pdf(ruta_pdf, output_dir, rules, regex_rules, unknowns, max_pag=None):
+def procesar_pdf(
+    ruta_pdf, output_dir, rules, regex_rules, unknowns, max_pag=None, strict=True
+):
     nombre_pdf = os.path.basename(ruta_pdf)
     print(f"\n=== Procesando {nombre_pdf} ===")
     doc = pymupdf.open(ruta_pdf)
@@ -342,14 +344,21 @@ def procesar_pdf(ruta_pdf, output_dir, rules, regex_rules, unknowns, max_pag=Non
                 # 1. Línea con label (≤5 palabras) → resolución por fields_rules
                 label = m.group(1).strip()
                 valor = m.group(2).strip()
-                key_field, parsed, es_desc = resolver_campo(label, rules, regex_rules)
-                if es_desc:
+                key_field, parsed, estado = resolver_campo(
+                    label, rules, regex_rules, strict
+                )
+                if estado == "unknown":
                     registrar_unknown(
                         unknowns, parsed, label, num_pag + 1, valor, nombre_pdf
                     )
                     # Tragar campo unknown + sus continuaciones
                     registro_actual.start_swallow()
                 else:
+                    if estado == "auto":
+                        # Fuera de rules pero aceptado → trazabilidad en suggest
+                        registrar_unknown(
+                            unknowns, parsed, label, num_pag + 1, valor, nombre_pdf
+                        )
                     registro_actual.set_campo(key_field, valor)
             elif registro_actual.swallowing:
                 # Continuación de campo unknown → tragar, no va a marca.json
@@ -465,6 +474,21 @@ def main():
         "--files",
         help="Procesar varios PDFs de la carpeta, separados por coma (ej. a.pdf,b.pdf)",
     )
+
+    def _parse_bool(v):
+        return v.lower() in ("true", "1", "yes", "y")
+
+    parser.add_argument(
+        "--strict",
+        type=_parse_bool,
+        default=True,
+        metavar="BOOL",
+        help=(
+            "true: solo fields de fields_rules.json (default); "
+            "false: rules + labels que cumplan el patrón (key=parsed, "
+            "también aparecen en suggest.txt)"
+        ),
+    )
     args = parser.parse_args()
 
     if args.file and args.files:
@@ -476,6 +500,7 @@ def main():
         print(f"No existe el directorio {carpeta}/")
         raise SystemExit(1)
 
+    os.makedirs("output", exist_ok=True)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     if args.file:
@@ -510,6 +535,12 @@ def main():
             "bootstrap: los labels (≤5 palabras) se aceptan como field; "
             "edita fields_rules.json para renombrar key_field."
         )
+    if not args.strict and rules:
+        print(
+            "AVISO: --strict false — labels fuera de fields_rules.json "
+            "se aceptan como field (key=parsed) y aparecen en suggest.txt"
+        )
+    print(f"Strict: {args.strict}")
     print(f"Carpeta: {carpeta}")
     print(f"PDFs a procesar: {len(nombres)}")
 
@@ -522,7 +553,9 @@ def main():
         ruta = os.path.join(carpeta, nombre)
         t0 = time.perf_counter()
         try:
-            r, p, h = procesar_pdf(ruta, OUTPUT_DIR, rules, regex_rules, unknowns)
+            r, p, h = procesar_pdf(
+                ruta, OUTPUT_DIR, rules, regex_rules, unknowns, strict=args.strict
+            )
             total_regs += r
             total_pngs += p
             total_has_logo += h
